@@ -17,7 +17,7 @@
 - Amounts are decimal strings with at most 18 decimal places (the column scale). Longer ones are rejected, never rounded.
 - Assumed limits: 15 integer digits, multiplier at most 100, so `amount x multiplier` fits the column.
 - Three layers: **prevent** (lock, checks), **refuse** (DB constraints), **detect** (assert, reconciliation in tests).
-- Why not check before the lock: the value can be stale. Under the lock, requests just wait their turn.
+- Why not check before the lock: the value can be stale. Under the lock, requests wait their turn.
 
 ## PSP callback edge cases
 
@@ -149,5 +149,5 @@
 
 ## AI usage
 
-- Claude Code was used to read the challenge and walk through the design decisions as a question-and-answer session. Every decision above was chosen by me.
+- Claude Code was used to read the challenge and walk through the design decisions as a question-and-answer session. Every technical decision above was decided by me.
 - Claude Code then wrote the code and tests from these decisions.
