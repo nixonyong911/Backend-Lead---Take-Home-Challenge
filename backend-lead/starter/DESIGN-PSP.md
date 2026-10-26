@@ -1,96 +1,77 @@
 # DESIGN-PSP: Adding the 50th PSP
 
-**Goal:** a junior adds a new PSP (payment service provider) in one day by writing **one adapter file and its tests**.
+**Goal:** a junior adds a new PSP (payment service provider) in one day by writing **one adapter file, its sample callbacks and one registry line**.
 They never touch the code that moves money.
 
-## Sketch: one callback, end to end
+## Sketch: who owns what
 
 ```text
-  PSP  ──  POST /psp/callbacks/:pspKey   (raw body bytes kept for the signature)
-                                        │
-                                        ▼
-┌─ SHARED CONTROLLER   seniors own · fixed order · never edited per PSP ───────┐
-│ 1. load psp_providers row (by :pspKey)      missing / disabled -> 404        │
-│ 2. get secret via secret_ref                from Vault, read at startup      │
-│ 3. registry.get(pspKey)                     -> this PSP's adapter            │
-│ 4. verifyCallback()  then  normalizeCallback()                               │
-└───────────────────────────────────────┬──────────────────────────────────────┘
-                                        ▼
-┌─ ADAPTER   junior writes ONE file · src/psp/adapters/<pspKey>.ts ────────────┐
-│ verifyCallback(raw, secret)  signature      bad -> 401                       │
-│ normalizeCallback(raw)  their format -> ours                                 │
-│   status word -> pending|completed|failed   unknown -> 400                   │
-│   amount -> new Money() or fromMinor()      invalid -> 400                   │
-└───────────────────────────────────────┬──────────────────────────────────────┘
-                                        ▼  PspCallback { pspRef, status, amount }  (same shape as A2)
-┌─ CORE   seniors own · same for every PSP · built in Part A ──────────────────┐
-│ find funding transaction by pspRef, lock    not found, stored -> 202         │
-│ amount differs from funding transaction     no credit, Failed + flag -> 202  │
-│ Pending -> Completed                        credit + wallet_txs ONCE -> 200  │
-│ Pending -> Failed                           no money moves -> 200            │
-│ duplicate, late retry, pending after done   no-op -> 202                     │
-│ failed after completed (invalid move)       rejected, flag -> 202            │
-└───────────────────────────────────────┬──────────────────────────────────────┘
-                                        ▼
-┌─ GLOBAL ERROR MIDDLEWARE   one fixed response for every PSP ─────────────────┐
-│ every typed error is logged the same way, same reply shape                   │
-│ our own fault (e.g. DB down)                500 -> the PSP retries           │
-└──────────────────────────────────────────────────────────────────────────────┘
+ PSP ──callback──▶ CONTROLLER ──────▶ ADAPTER ────────────▶ CORE
+                   (fixed)            (junior's one file)   (fixed, owns money)
+                   load config        check signature       lock funding tx row
+                   pick adapter       translate their       Pending -> Completed
+                   keep raw body      format to ours        credit wallet once
+
+ Junior edits: adapter file + sample callbacks + 1 registry line. Nothing else.
 ```
 
-## 1. The interface
+- **Why this picture:** it shows what a reviewer must check. Only the middle box changes per PSP. The boxes on both sides are shared and owned by seniors.
 
-Names, routes and fields follow Part A exactly. The only change: the callback route gets a `:pspKey` so we know which PSP is calling.
+## 1. The interface: the adapter is a translator
+
+Every PSP is different: its own field names, status words, amount units and signature scheme.
+We do not try to make 50 PSPs look alike. Instead, **each adapter translates between one PSP's format and our one standard shape**.
+Everything outside the adapter only ever sees our shape.
 
 ```ts
 interface PspAdapter {
-  readonly pspKey: string;                                       // "stripe", "adyen", ...
-
-  // A1. Create a deposit (POST /deposits). Core already saved the Pending funding transaction.
-  createDeposit(req: CreateDepositRequest): Promise<PspStartResult>;
-  // A2. Handle the PSP callback (POST /psp/callbacks/:pspKey). Two steps, always in this order:
-  verifyCallback(raw: RawRequest, secret: string): void;         // throws InvalidSignatureError
-  normalizeCallback(raw: RawRequest): PspCallback;               // throws InvalidPayload / UnknownStatus
-  // A4. Withdrawals (POST /withdrawals). Core already debited the wallet.
-  createWithdrawal(req: CreateWithdrawalRequest): Promise<PspStartResult>;
+  readonly pspKey: string;                                // "stripe", "adyen", ...; route is POST /psp/callbacks/:pspKey
+  // Deposit (POST /deposits): core already saved the Pending funding tx; ask the PSP to start the payment.
+  createDeposit(req: PspPaymentRequest): Promise<PspStartResult>;
+  // Callback (POST /psp/callbacks/:pspKey): the controller always calls these two in this order.
+  verifySignature(raw: RawRequest, secret: string): void; // throws InvalidSignatureError
+  parseCallback(raw: RawRequest): PspCallback;            // their format -> ours
+  // Withdrawal (POST /withdrawals): core already debited the wallet; ask the PSP to pay out.
+  createWithdrawal(req: PspPaymentRequest): Promise<PspStartResult>;
 }
-type CreateDepositRequest    = { memberId: string; amount: Money; pspRef: string };  // A1 body + our pspRef
-type CreateWithdrawalRequest = { memberId: string; amount: Money; pspRef: string };  // A4 body + our pspRef
-type PspStartResult          = { pspRef: string; redirectUrl?: string };              // e.g. a payment page
-type PspCallback = {                                             // same shape as the A2 callback body
-  pspRef: string;                                                // our shared transaction id
-  status: 'pending' | 'completed' | 'failed';                    // A2 words, plus 'pending' for PSPs that send it
-  amount: Money;                                                 // value object, see section 2
+type PspPaymentRequest = { memberId: string; amount: Money; pspRef: string };  // our pspRef, sent to the PSP
+type PspStartResult    = { redirectUrl?: string };                              // e.g. a payment page
+type PspCallback = {             // our standard shape, same as the Part A callback body
+  pspRef: string;                // our id for the funding transaction
+  status: 'pending' | 'completed' | 'failed';            // Part A words, plus 'pending' for PSPs that send it
+  amount: Money;                 // value object, see section 2
 };
 ```
 
-- **Why an interface:** each adapter has one job, which is to talk to one PSP in its own format (single responsibility).
-  We add PSPs by adding classes, not by editing old code (open/closed).
-- **The adapter only talks to the PSP. The core owns the money.** The core saves the funding transaction, moves it
-  `Pending -> Completed / Failed`, updates the wallet and writes `wallet_txs`. `pspRef` alone tells the core which
-  funding transaction (deposit or withdrawal) a callback belongs to.
-- **A3. Record wagers is not in this interface.** A wager moves money only inside our own wallet. No PSP is involved, so it stays in the core.
-  Putting it in every adapter would make 50 juniors re-implement the same money logic.
-- **Why it is still safe without a base class:** the order `verifyCallback -> normalizeCallback -> core` lives in the **shared controller**, which juniors do not edit.
-  An adapter cannot skip verification, because the controller always calls it first.
+**How a junior uses it (the day-one checklist):**
+1. Write `src/psp/adapters/acmepay.ts`: `class AcmePayAdapter implements PspAdapter`.
+2. Register it: `registry.add(new AcmePayAdapter())`.
+3. Save the PSP's sample callbacks as fixtures (section 4). The shared tests then run on the new adapter automatically.
+
+- **Why an interface:** it is the junior's checklist, enforced by TypeScript. A missing method or a wrong return shape does not compile.
+- **Why the adapter only maps the format:** it changes field names, status words and units. It holds no business rules.
+  Rules that apply to every PSP (valid amount, known status, state machine) live in shared code, so 50 adapters cannot each get them slightly wrong.
+- **Why deposit, callback and withdrawal:** these are the three points where money crosses between us and a PSP, so each needs PSP-specific code.
+  The core always moves money first (saves the Pending row, or debits the wallet) and only then calls the adapter. The adapter never writes to our DB.
+- **Why no wager method:** a wager moves money only inside our own wallet. No PSP is involved, so there is nothing to translate.
+  Putting it in the adapter would make 50 juniors re-implement the same money logic. It stays in the core.
+- **Why no base class:** the order `verifySignature -> parseCallback -> core` lives in the **controller**, which juniors do not edit.
+  An adapter cannot skip the signature check, because the controller always calls it first.
 
 ## 2. Verification and normalization
 
-- **Signature check** lives in `verifyCallback()`. PSPs differ here (HMAC-SHA256 over the raw body, MD5 over joined fields, etc.).
-  The controller keeps the **raw body bytes**, because a signature is computed over the exact bytes, not over parsed JSON.
-- **Money value object**: `new Money("50.20")` checks itself when it is created (digits only, positive, max 18 decimals).
+- **Signature check** lives in `verifySignature()`. PSPs differ here (HMAC-SHA256 over the raw body, MD5 over joined fields, etc.).
+- **Money value object:** `new Money("50.20")` checks itself when it is created (digits only, positive, at most 18 decimals).
   `Money.fromMinor("5020", 2)` handles PSPs that send cents. Core functions only accept `Money`, so a bad amount cannot reach the ledger.
-- **Status words** are mapped in `normalizeCallback()` (`"SETTLED"`, `"paid"`, `"00"` -> `completed`).
+- **Status words** are mapped in `parseCallback()` (`"SETTLED"`, `"paid"`, `"00"` -> `completed`).
   An unknown word throws `UnknownStatusError`. **We never guess success.**
-- **Core rules are the same for every PSP** (built in Part A). The core finds the funding transaction by `pspRef` and locks the row.
-  It credits only on the one move `Pending -> Completed`. A duplicate, a late retry or `pending` after `success` changes nothing.
-  If the amount differs from the funding transaction, nothing is credited and it is flagged for review.
-- **Standard errors + one fixed response.** All errors are typed. One global middleware logs them the same way and
-  returns the same reply shape for every PSP (status codes are in the sketch).
-  PSPs retry based on the HTTP status. `200` means "applied". `202` means "stored, nothing applied, stop retrying"
-  (duplicate, unknown ref, amount mismatch, invalid move): a retry will never change the answer, and some PSPs retry any `4xx`.
-  A bad signature or an unreadable body gets `4xx`: the sender is broken or is not the PSP.
-  **Only our own fault returns `500`**, the one case where we want a retry.
+- **Out-of-order statuses** are handled once, in the core (built in Part A): it credits only on the move `Pending -> Completed`.
+  A duplicate, a late retry or `pending` after `success` changes nothing. Adapters never think about order.
+- **One fixed reply for every PSP.** PSPs retry based on the HTTP status.
+  - `200`: applied.
+  - `202`: stored, nothing applied, stop retrying (duplicate, unknown ref, amount mismatch, invalid move). A retry will never change the answer, and some PSPs retry any `4xx`.
+  - `400` / `401`: unreadable body or bad signature. The sender is broken or is not the PSP.
+  - `500`: **only our own fault** (e.g. DB down), the one case where we want a retry.
 
 ## 3. How config drives it
 
@@ -98,7 +79,7 @@ type PspCallback = {                                             // same shape a
   `psp_key, enabled, currencies, min/max amount, base_url, secret_ref`.
 - **Split by risk:** anything that changes what money *means* (amount units, signature scheme) stays in **reviewed adapter code**.
   A bad DB edit can switch a PSP off. It cannot credit 100x.
-- **Secrets live in a vault.** The row stores only `secret_ref` (a path). The app reads the secret **at startup**, not at build, so secrets never sit in build files.
+- **Secrets live in a vault.** The row stores only `secret_ref` (a path). The app reads the secret **at startup**, so secrets never sit in code or build files.
 - A new PSP starts with `enabled = false`. It goes live only after its tests pass and a reviewer approves.
 
 ## 4. Testing without the real PSP
@@ -111,4 +92,9 @@ type PspCallback = {                                             // same shape a
 - **Mock PSP server (CI):** a small fake PSP that sends duplicate, concurrent, late and out-of-order callbacks to the real app and DB.
   It proves the money is still credited exactly once.
 
-**Assumption:** these are payment PSPs that only read the HTTP status code. If a PSP needs its own reply format, we would add an optional `toResponse()` to the interface.
+## Next steps
+
+- **One table per PSP** (e.g. `psp_acmepay_callbacks`) to keep each PSP's own fields as real columns, easy to query and report on.
+  Each table needs a migration (DB script) built from a standard template, so every PSP table shares the same core columns.
+  Not now: it would add a migration to the junior's day-one task. Today the raw payload is kept in the shared `psp_callbacks` table.
+- **Custom replies:** we assume PSPs only read the HTTP status. If one needs its own reply body, add an optional `toResponse()` to the interface.
