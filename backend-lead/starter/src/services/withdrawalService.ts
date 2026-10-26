@@ -24,7 +24,7 @@ export async function requestWithdrawal(
   if (!wallet) throw new NotFound('member');
 
   const amount = dec(amountInput);
-  const requestHash = hashRequest('withdrawal', { memberId, amount: amount.toFixed() });
+  const requestHash = hashRequest('withdrawal', { memberId, amount: amountInput });
 
   return sequelize.transaction((t) =>
     runIdempotent(t, memberId, idempotencyKey, requestHash, async () => {

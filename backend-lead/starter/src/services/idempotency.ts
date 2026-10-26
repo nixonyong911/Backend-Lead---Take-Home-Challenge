@@ -3,8 +3,8 @@ import { QueryTypes, Transaction } from 'sequelize';
 import { sequelize } from '../db/sequelize';
 import { IdempotencyKeyReused, InvariantViolation } from '../lib/errors';
 
-// Fingerprint of one user action. Callers pass normalized input (e.g. "10.0" -> "10")
-// with a fixed key order, so a retry of the same action always hashes the same.
+// Fingerprint of one user action. Callers pass the amount string exactly as sent (no normalizing:
+// "10" and "10.00" are different requests) with a fixed key order, so only a byte-identical retry replays.
 export function hashRequest(operation: string, input: Record<string, string | number>): string {
   return createHash('sha256').update(JSON.stringify({ operation, ...input })).digest('hex');
 }

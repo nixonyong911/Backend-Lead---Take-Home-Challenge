@@ -85,15 +85,22 @@ describe('POST /wallets/:walletId/wagers', () => {
     await expectWalletConsistent(walletId);
   });
 
-  it('treats "10" and "10.00" with the same key as the same request', async () => {
-    const { memberId, walletId } = await createMember();
-    await fundWallet(memberId, '100');
-    const key = newKey();
+  it.each(['10.00', '10.000000000000000001'])(
+    'treats "10" then "%s" with the same key as a different request (422), with no money moved',
+    async (retryAmount) => {
+      const { memberId, walletId } = await createMember();
+      await fundWallet(memberId, '100');
+      const key = newKey();
 
-    expect((await postWager(walletId, '10', key)).status).toBe(201);
-    expect((await postWager(walletId, '10.00', key)).status).toBe(201);
-    expect((await walletState(walletId)).balance).toBe('90.000000000000000000');
-  });
+      expect((await postWager(walletId, '10', key)).status).toBe(201);
+      const retry = await postWager(walletId, retryAmount, key);
+
+      expect(retry.status).toBe(422);
+      expect(retry.body.error).toBe('idempotency_key_reused');
+      expect((await walletState(walletId)).balance).toBe('90.000000000000000000');
+      await expectWalletConsistent(walletId);
+    },
+  );
 
   it('rejects a reused Idempotency-Key with a different amount (422)', async () => {
     const { memberId, walletId } = await createMember();

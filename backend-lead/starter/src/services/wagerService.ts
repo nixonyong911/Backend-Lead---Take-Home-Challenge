@@ -21,7 +21,7 @@ export async function placeWager(walletId: string, amountInput: string, idempote
   if (!wallet) throw new NotFound('wallet');
 
   const amount = dec(amountInput);
-  const requestHash = hashRequest('wager', { walletId, amount: amount.toFixed() });
+  const requestHash = hashRequest('wager', { walletId, amount: amountInput });
 
   return sequelize.transaction((t) =>
     runIdempotent(t, wallet.memberId, idempotencyKey, requestHash, async () => {

@@ -100,7 +100,7 @@
   4. Same key, different request: `422`. The client reused a key for another action.
 - Same key in parallel: Postgres makes the second insert wait for the first commit. No extra lock needed.
 - Key and money change commit together; a crash leaves nothing, so a retry runs cleanly. 
-- The fingerprint uses normalized amounts: a retry with `"10.00"` instead of `"10"` is the same request.
+- The fingerprint uses the amount exactly as sent: `"10"` then `"10.00"` with one key is `422`.
 - Callbacks use `pspRef` as their key: the PSP sends it back on every retry.
 - Why per action: a server-made id is new on every request, so it cannot spot a retry.
 

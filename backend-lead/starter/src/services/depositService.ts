@@ -33,7 +33,7 @@ export async function createDeposit(input: CreateDepositInput, idempotencyKey: s
   const amount = dec(input.amount);
   const requestHash = hashRequest('deposit', {
     memberId: member.id,
-    amount: amount.toFixed(),
+    amount: input.amount,
     turnoverMultiplier: input.turnoverMultiplier,
   });
 
