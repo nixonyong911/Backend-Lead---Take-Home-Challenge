@@ -45,3 +45,18 @@ test/                    # add your tests here
 - Any operation writing more than one row runs in a single DB transaction (see `memberService.createMember`).
 - Routes validate input with zod and delegate to services; business logic lives in services, not routes.
 - New tables are created via migrations, not `sync()`.
+
+## Trying the API
+
+`POST /deposits`, `POST /wallets/:walletId/wagers` and `POST /withdrawals` require an `Idempotency-Key` header
+(a UUID the client makes once per action and resends on retries). Without it they answer `400`.
+
+```bash
+curl -s -X POST localhost:3000/members -H 'Content-Type: application/json' -d '{"username":"alice01"}'
+curl -s -X POST localhost:3000/deposits -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" -d '{"memberId":"<member id>","amount":"100.50","turnoverMultiplier":1}'
+curl -s -X POST localhost:3000/psp/callbacks -H 'Content-Type: application/json' \
+  -d '{"pspRef":"<pspRef>","status":"completed","amount":"100.50"}'
+```
+
+Design choices and trade-offs: see `DECISIONS.md`. Part B: `DESIGN-PSP.md`.
