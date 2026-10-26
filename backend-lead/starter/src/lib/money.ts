@@ -1,4 +1,5 @@
 import BigNumber from 'bignumber.js';
+import { z } from 'zod';
 
 // Money invariants for this codebase:
 // - Money is stored as DECIMAL(36,18) in Postgres and travels as strings in JS/JSON.
@@ -14,3 +15,18 @@ export function dec(value: string | number | BigNumber): BigNumber {
 }
 
 export const ZERO = dec(0);
+
+// Same shape the pg driver returns for DECIMAL(36,18), so API responses look the same everywhere.
+export function toMoneyString(value: BigNumber): string {
+  return value.toFixed(18);
+}
+
+// Plain decimal string, at most 18 decimals (the column scale) so nothing is ever rounded.
+// 15 integer digits leaves headroom for amount x turnoverMultiplier inside DECIMAL(36,18).
+// No sign, no exponent ("1e2"), no JS numbers.
+const MONEY_PATTERN = /^\d{1,15}(\.\d{1,18})?$/;
+
+export const positiveMoney = z
+  .string()
+  .regex(MONEY_PATTERN, 'must be a decimal string with at most 18 decimal places')
+  .refine((s) => dec(s).gt(0), 'must be greater than 0');
